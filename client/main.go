@@ -6,8 +6,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"math/big"
 	"flag"
 	"fmt"
 	"github.com/bschaatsbergen/dnsdialer"
@@ -34,6 +40,29 @@ import (
 )
 
 type getCredsFunc func(string) (string, string, string, error)
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
 
 func solveCaptchaViaHTTP(captchaImg string) (string, error) {
 	keyCh := make(chan string, 1)
@@ -68,18 +97,26 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Готово</h2></body></html>`)
 	})
 
+	tlsCert, tlsErr := generateSelfSignedCert()
+	if tlsErr != nil {
+		return "", fmt.Errorf("generate TLS cert: %s", tlsErr)
+	}
+
 	srv := &http.Server{
 		Addr:    "127.0.0.1:8765",
 		Handler: mux,
+		TLSConfig: &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		},
 	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("captcha HTTP server error: %s", err)
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Printf("captcha HTTPS server error: %s", err)
 		}
 	}()
 
-	captchaURL := "http://127.0.0.1:8765"
+	captchaURL := "https://127.0.0.1:8765"
 	fmt.Println("CAPTCHA_REQUIRED:" + captchaURL)
 	openBrowser(captchaURL)
 
