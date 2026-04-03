@@ -97,26 +97,35 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Готово</h2></body></html>`)
 	})
 
-	tlsCert, tlsErr := generateSelfSignedCert()
-	if tlsErr != nil {
-		return "", fmt.Errorf("generate TLS cert: %s", tlsErr)
-	}
-
 	srv := &http.Server{
 		Addr:    "127.0.0.1:8765",
 		Handler: mux,
-		TLSConfig: &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-		},
 	}
 
-	go func() {
-		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-			log.Printf("captcha HTTPS server error: %s", err)
+	var captchaURL string
+	if runtime.GOOS == "android" {
+		captchaURL = "http://127.0.0.1:8765"
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("captcha HTTP server error: %s", err)
+			}
+		}()
+	} else {
+		tlsCert, tlsErr := generateSelfSignedCert()
+		if tlsErr != nil {
+			return "", fmt.Errorf("generate TLS cert: %s", tlsErr)
 		}
-	}()
+		srv.TLSConfig = &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+		}
+		captchaURL = "https://127.0.0.1:8765"
+		go func() {
+			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Printf("captcha HTTPS server error: %s", err)
+			}
+		}()
+	}
 
-	captchaURL := "https://127.0.0.1:8765"
 	fmt.Println("CAPTCHA_REQUIRED:" + captchaURL)
 	openBrowser(captchaURL)
 
