@@ -33,6 +33,61 @@ import (
 
 type getCredsFunc func(string) (string, string, string, error)
 
+func solveCaptchaViaHTTP(captchaImg string) (string, error) {
+	keyCh := make(chan string, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:sans-serif;text-align:center;padding:20px}
+img{max-width:100%%;margin:16px 0}
+input{font-size:24px;padding:12px;width:80%%;box-sizing:border-box}
+button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
+</head><body>
+<h2>Введите капчу</h2>
+<img src="%s" alt="captcha"/>
+<form onsubmit="fetch('/solve?key='+encodeURIComponent(document.getElementById('k').value)).then(()=>{document.body.innerHTML='<h2>Готово</h2>'});return false;">
+<br><input id="k" type="text" autofocus placeholder="Текст с картинки"/>
+<br><button type="submit">Отправить</button>
+</form></body></html>`, captchaImg)
+	})
+	mux.HandleFunc("/solve", func(w http.ResponseWriter, r *http.Request) {
+		key := r.URL.Query().Get("key")
+		if key != "" {
+			select {
+			case keyCh <- key:
+			default:
+			}
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Готово</h2></body></html>`)
+	})
+
+	srv := &http.Server{
+		Addr:    "127.0.0.1:8765",
+		Handler: mux,
+	}
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("captcha HTTP server error: %s", err)
+		}
+	}()
+
+	fmt.Println("CAPTCHA_REQUIRED:http://127.0.0.1:8765")
+
+	key := <-keyCh
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.Shutdown(ctx)
+
+	return key, nil
+}
+
 func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, error) {
 
 	doRequest := func(data string, url string) (resp map[string]interface{}, err error) {
@@ -93,17 +148,68 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 		return "", "", "", fmt.Errorf("request error:%s", err)
 	}
 
-	token1 := resp["data"].(map[string]interface{})["access_token"].(string)
+	dataMap, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return "", "", "", fmt.Errorf("unexpected anon token response: %v", resp)
+	}
+	token1, ok := dataMap["access_token"].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("missing access_token in response: %v", resp)
+	}
 
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token1)
 	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
 
-	resp, err = doRequest(data, url)
-	if err != nil {
-		return "", "", "", fmt.Errorf("request error:%s", err)
-	}
+	var token2 string
+	const maxCaptchaAttempts = 3
+	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
+		resp, err = doRequest(data, url)
+		if err != nil {
+			return "", "", "", fmt.Errorf("request error:%s", err)
+		}
 
-	token2 := resp["response"].(map[string]interface{})["token"].(string)
+		// Check for captcha error
+		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+			errCode, _ := errObj["error_code"].(float64)
+			if errCode == 14 {
+				if attempt == maxCaptchaAttempts {
+					return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
+				}
+
+				captchaSid, _ := errObj["captcha_sid"].(string)
+				if captchaSid == "" {
+					// captcha_sid may be a number
+					if sidNum, ok := errObj["captcha_sid"].(float64); ok {
+						captchaSid = fmt.Sprintf("%.0f", sidNum)
+					}
+				}
+				captchaImg, _ := errObj["captcha_img"].(string)
+
+				log.Printf("Captcha required (attempt %d/%d), sid=%s", attempt+1, maxCaptchaAttempts, captchaSid)
+
+				captchaKey, solveErr := solveCaptchaViaHTTP(captchaImg)
+				if solveErr != nil {
+					return "", "", "", fmt.Errorf("captcha solve error: %s", solveErr)
+				}
+
+				// Rebuild data with captcha params
+				data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s&captcha_sid=%s&captcha_key=%s",
+					link, token1, captchaSid, captchaKey)
+				continue
+			}
+			return "", "", "", fmt.Errorf("VK API error: %v", errObj)
+		}
+
+		respMap, ok := resp["response"].(map[string]interface{})
+		if !ok {
+			return "", "", "", fmt.Errorf("unexpected getAnonymousToken response: %v", resp)
+		}
+		token2, ok = respMap["token"].(string)
+		if !ok {
+			return "", "", "", fmt.Errorf("missing token in response: %v", resp)
+		}
+		break
+	}
 
 	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
 	url = "https://calls.okcdn.ru/fb.do"
