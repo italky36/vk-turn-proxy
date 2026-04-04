@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -65,35 +66,44 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 }
 
 func solveCaptchaViaHTTP(captchaImg string) (string, error) {
+	// Pre-fetch captcha image and encode as base64 data URI
+	imgDataURI := ""
+	imgResp, imgErr := http.Get(captchaImg)
+	if imgErr == nil {
+		imgBytes, readErr := io.ReadAll(imgResp.Body)
+		imgResp.Body.Close()
+		if readErr == nil {
+			contentType := imgResp.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "image/png"
+			}
+			imgDataURI = fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(imgBytes))
+		}
+	}
+	if imgDataURI == "" {
+		log.Printf("Warning: could not fetch captcha image, using direct URL")
+		imgDataURI = captchaImg
+	}
+
 	keyCh := make(chan string, 1)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!DOCTYPE html>
+		fmt.Fprintf(w, `<!DOCTYPE html>
 <html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:sans-serif;text-align:center;padding:20px}
-img{max-width:100%;margin:16px 0}
-input{font-size:24px;padding:12px;width:80%;box-sizing:border-box}
+img{max-width:100%%;margin:16px 0}
+input{font-size:24px;padding:12px;width:80%%;box-sizing:border-box}
 button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 </head><body>
 <h2>Введите капчу</h2>
-<img src="/captcha_img" alt="captcha"/>
+<img src="%s" alt="captcha"/>
 <form onsubmit="fetch('/solve?key='+encodeURIComponent(document.getElementById('k').value)).then(()=>{document.body.innerHTML='<h2>Готово</h2>'});return false;">
 <br><input id="k" type="text" autofocus placeholder="Текст с картинки"/>
 <br><button type="submit">Отправить</button>
-</form></body></html>`)
-	})
-	mux.HandleFunc("/captcha_img", func(w http.ResponseWriter, r *http.Request) {
-		resp, err := http.Get(captchaImg)
-		if err != nil {
-			http.Error(w, "failed to fetch captcha", http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
-		io.Copy(w, resp.Body)
+</form></body></html>`, imgDataURI)
 	})
 	mux.HandleFunc("/solve", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
