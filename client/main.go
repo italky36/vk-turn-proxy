@@ -6,15 +6,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
-	"math/big"
 	"flag"
 	"fmt"
 	"github.com/bschaatsbergen/dnsdialer"
@@ -30,9 +23,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -41,136 +32,6 @@ import (
 )
 
 type getCredsFunc func(string) (string, string, string, error)
-
-func generateSelfSignedCert() (tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		NotBefore:    time.Now(),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-	}
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return tls.X509KeyPair(certPEM, keyPEM)
-}
-
-func solveCaptchaViaHTTP(captchaImg string) (string, error) {
-	// Pre-fetch captcha image and encode as base64 data URI
-	imgDataURI := ""
-	imgResp, imgErr := http.Get(captchaImg)
-	if imgErr == nil {
-		imgBytes, readErr := io.ReadAll(imgResp.Body)
-		imgResp.Body.Close()
-		if readErr == nil {
-			contentType := imgResp.Header.Get("Content-Type")
-			if contentType == "" {
-				contentType = "image/png"
-			}
-			imgDataURI = fmt.Sprintf("data:%s;base64,%s", contentType, base64.StdEncoding.EncodeToString(imgBytes))
-		}
-	}
-	if imgDataURI == "" {
-		log.Printf("Warning: could not fetch captcha image, using direct URL")
-		imgDataURI = captchaImg
-	}
-
-	keyCh := make(chan string, 1)
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, `<!DOCTYPE html>
-<html><head>
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<style>body{font-family:sans-serif;text-align:center;padding:20px}
-img{max-width:100%;margin:16px 0}
-input{font-size:24px;padding:12px;width:80%;box-sizing:border-box}
-button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
-</head><body>
-<h2>Введите капчу</h2>
-<img src="`)
-		io.WriteString(w, imgDataURI)
-		io.WriteString(w, `" alt="captcha"/>
-<form onsubmit="fetch('/solve?key='+encodeURIComponent(document.getElementById('k').value)).then(()=>{document.body.innerHTML='<h2>Готово</h2>'});return false;">
-<br><input id="k" type="text" autofocus placeholder="Текст с картинки"/>
-<br><button type="submit">Отправить</button>
-</form></body></html>`)
-	})
-	mux.HandleFunc("/solve", func(w http.ResponseWriter, r *http.Request) {
-		key := r.URL.Query().Get("key")
-		if key != "" {
-			select {
-			case keyCh <- key:
-			default:
-			}
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, `<!DOCTYPE html><html><body><h2>Готово</h2></body></html>`)
-	})
-
-	srv := &http.Server{
-		Addr:    "127.0.0.1:8765",
-		Handler: mux,
-	}
-
-	var captchaURL string
-	if runtime.GOOS == "android" {
-		captchaURL = "http://127.0.0.1:8765"
-		go func() {
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("captcha HTTP server error: %s", err)
-			}
-		}()
-	} else {
-		tlsCert, tlsErr := generateSelfSignedCert()
-		if tlsErr != nil {
-			return "", fmt.Errorf("generate TLS cert: %s", tlsErr)
-		}
-		srv.TLSConfig = &tls.Config{
-			Certificates: []tls.Certificate{tlsCert},
-		}
-		captchaURL = "https://127.0.0.1:8765"
-		go func() {
-			if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
-				log.Printf("captcha HTTPS server error: %s", err)
-			}
-		}()
-	}
-
-	fmt.Println("CAPTCHA_REQUIRED:" + captchaURL)
-	openBrowser(captchaURL)
-
-	key := <-keyCh
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	srv.Shutdown(ctx)
-
-	return key, nil
-}
-
-func openBrowser(url string) {
-	switch runtime.GOOS {
-	case "windows":
-		exec.Command("cmd", "/c", "start", url).Start()
-	case "darwin":
-		exec.Command("open", url).Start()
-	case "linux":
-		exec.Command("xdg-open", url).Start()
-	// android — APK handles CAPTCHA_REQUIRED: via stdout
-	}
-}
 
 func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, error) {
 
@@ -242,57 +103,59 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 	}
 
 	data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s", link, token1)
-	url = "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
+	urlAddr := "https://api.vk.ru/method/calls.getAnonymousToken?v=5.274&client_id=6287487"
 
-	var token2 string
-	const maxCaptchaAttempts = 3
-	for attempt := 0; attempt <= maxCaptchaAttempts; attempt++ {
-		resp, err = doRequest(data, url)
-		if err != nil {
-			return "", "", "", fmt.Errorf("request error:%s", err)
-		}
+	resp, err = doRequest(data, urlAddr)
+	if err != nil {
+		return "", "", "", fmt.Errorf("request error:%s", err)
+	}
 
-		// Check for captcha error
-		if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
-			errCode, _ := errObj["error_code"].(float64)
-			if errCode == 14 {
-				if attempt == maxCaptchaAttempts {
-					return "", "", "", fmt.Errorf("captcha failed after %d attempts", maxCaptchaAttempts)
-				}
+	// Check for captcha error and solve automatically
+	if errObj, hasErr := resp["error"].(map[string]interface{}); hasErr {
+		captchaErr := ParseVkCaptchaError(errObj)
+		if captchaErr != nil && captchaErr.IsCaptchaError() {
+			log.Printf("Captcha detected, solving automatically...")
 
-				captchaSid, _ := errObj["captcha_sid"].(string)
-				if captchaSid == "" {
-					// captcha_sid may be a number
-					if sidNum, ok := errObj["captcha_sid"].(float64); ok {
-						captchaSid = fmt.Sprintf("%.0f", sidNum)
-					}
-				}
-				captchaImg, _ := errObj["captcha_img"].(string)
-
-				log.Printf("Captcha required (attempt %d/%d), sid=%s", attempt+1, maxCaptchaAttempts, captchaSid)
-
-				captchaKey, solveErr := solveCaptchaViaHTTP(captchaImg)
-				if solveErr != nil {
-					return "", "", "", fmt.Errorf("captcha solve error: %s", solveErr)
-				}
-
-				// Rebuild data with captcha params
-				data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123&access_token=%s&captcha_sid=%s&captcha_key=%s",
-					link, token1, captchaSid, captchaKey)
-				continue
+			successToken, solveErr := solveVkCaptcha(captchaErr)
+			if solveErr != nil {
+				return "", "", "", fmt.Errorf("captcha solving failed: %s", solveErr)
 			}
+
+			// Retry with captcha solution
+			log.Printf("Retrying with captcha solution...")
+			data = fmt.Sprintf("vk_join_link=https://vk.com/call/join/%s&name=123"+
+				"&captcha_key="+
+				"&captcha_sid=%s"+
+				"&is_sound_captcha=0"+
+				"&success_token=%s"+
+				"&captcha_ts=%s"+
+				"&captcha_attempt=%s"+
+				"&access_token=%s",
+				link,
+				captchaErr.CaptchaSid,
+				successToken,
+				captchaErr.CaptchaTs,
+				captchaErr.CaptchaAttempt,
+				token1)
+			resp, err = doRequest(data, urlAddr)
+			if err != nil {
+				return "", "", "", fmt.Errorf("request error:%s", err)
+			}
+			if errObj2, ok := resp["error"].(map[string]interface{}); ok {
+				return "", "", "", fmt.Errorf("VK API error after captcha solve: %v", errObj2)
+			}
+		} else {
 			return "", "", "", fmt.Errorf("VK API error: %v", errObj)
 		}
+	}
 
-		respMap, ok := resp["response"].(map[string]interface{})
-		if !ok {
-			return "", "", "", fmt.Errorf("unexpected getAnonymousToken response: %v", resp)
-		}
-		token2, ok = respMap["token"].(string)
-		if !ok {
-			return "", "", "", fmt.Errorf("missing token in response: %v", resp)
-		}
-		break
+	respMap, ok := resp["response"].(map[string]interface{})
+	if !ok {
+		return "", "", "", fmt.Errorf("unexpected getAnonymousToken response: %v", resp)
+	}
+	token2, ok := respMap["token"].(string)
+	if !ok {
+		return "", "", "", fmt.Errorf("missing token in response: %v", resp)
 	}
 
 	data = fmt.Sprintf("%s%s%s", "session_data=%7B%22version%22%3A2%2C%22device_id%22%3A%22", uuid.New(), "%22%2C%22client_version%22%3A1.1%2C%22client_type%22%3A%22SDK_JS%22%7D&method=auth.anonymLogin&format=JSON&application_key=CGMMEJLGDIHBABABA")
