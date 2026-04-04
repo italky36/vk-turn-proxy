@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/bschaatsbergen/dnsdialer"
 	"io"
 	"log"
 	"math/rand"
@@ -83,7 +84,7 @@ func (e *VkCaptchaError) IsCaptchaError() bool {
 }
 
 // solveVkCaptcha solves VK Not Robot captcha automatically and returns success_token
-func solveVkCaptcha(captchaErr *VkCaptchaError) (string, error) {
+func solveVkCaptcha(captchaErr *VkCaptchaError, dialer *dnsdialer.Dialer) (string, error) {
 	log.Printf("[Captcha] Solving Not Robot captcha automatically...")
 
 	time.Sleep(1500*time.Millisecond + time.Duration(rand.Intn(1000))*time.Millisecond)
@@ -94,7 +95,7 @@ func solveVkCaptcha(captchaErr *VkCaptchaError) (string, error) {
 	}
 
 	// Step 1: Fetch the captcha HTML page to get powInput and cookies
-	powInput, difficulty, cookies, err := fetchPowInput(captchaErr.RedirectUri)
+	powInput, difficulty, cookies, err := fetchPowInput(captchaErr.RedirectUri, dialer)
 	if err != nil {
 		return "", fmt.Errorf("failed to fetch PoW input: %w", err)
 	}
@@ -105,7 +106,7 @@ func solveVkCaptcha(captchaErr *VkCaptchaError) (string, error) {
 	log.Printf("[Captcha] PoW solved: hash=%s", hash)
 
 	// Step 3: Call captchaNotRobot API
-	successToken, err := callCaptchaNotRobot(sessionToken, hash, cookies)
+	successToken, err := callCaptchaNotRobot(sessionToken, hash, cookies, dialer)
 	if err != nil {
 		return "", fmt.Errorf("captchaNotRobot API failed: %w", err)
 	}
@@ -115,7 +116,7 @@ func solveVkCaptcha(captchaErr *VkCaptchaError) (string, error) {
 }
 
 // fetchPowInput fetches the captcha HTML page and extracts powInput, difficulty, and cookies
-func fetchPowInput(redirectUri string) (string, int, string, error) {
+func fetchPowInput(redirectUri string, dialer *dnsdialer.Dialer) (string, int, string, error) {
 	req, err := http.NewRequest("GET", redirectUri, nil)
 	if err != nil {
 		return "", 0, "", err
@@ -124,7 +125,12 @@ func fetchPowInput(redirectUri string) (string, int, string, error) {
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 
-	client := &http.Client{Timeout: 20 * time.Second}
+	client := &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			DialContext: dialer.DialContext,
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", 0, "", err
@@ -182,7 +188,7 @@ func solvePoW(powInput string, difficulty int) string {
 }
 
 // callCaptchaNotRobot executes all 4 steps of the captchaNotRobot API
-func callCaptchaNotRobot(sessionToken, hash, cookies string) (string, error) {
+func callCaptchaNotRobot(sessionToken, hash, cookies string, dialer *dnsdialer.Dialer) (string, error) {
 	vkReq := func(method string, postData string) (map[string]interface{}, error) {
 		requestURL := "https://api.vk.ru/method/" + method + "?v=5.131"
 
@@ -207,7 +213,12 @@ func callCaptchaNotRobot(sessionToken, hash, cookies string) (string, error) {
 			req.Header.Set("Cookie", cookies)
 		}
 
-		client := &http.Client{Timeout: 20 * time.Second}
+		client := &http.Client{
+			Timeout: 20 * time.Second,
+			Transport: &http.Transport{
+				DialContext: dialer.DialContext,
+			},
+		}
 		httpResp, err := client.Do(req)
 		if err != nil {
 			return nil, err

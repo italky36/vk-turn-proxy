@@ -116,7 +116,7 @@ func getVkCreds(link string, dialer *dnsdialer.Dialer) (string, string, string, 
 		if captchaErr != nil && captchaErr.IsCaptchaError() {
 			log.Printf("Captcha detected, solving automatically...")
 
-			successToken, solveErr := solveVkCaptcha(captchaErr)
+			successToken, solveErr := solveVkCaptcha(captchaErr, dialer)
 			if solveErr != nil {
 				return "", "", "", fmt.Errorf("captcha solving failed: %s", solveErr)
 			}
