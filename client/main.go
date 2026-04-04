@@ -95,7 +95,6 @@ button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 		w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 		io.Copy(w, resp.Body)
 	})
-	})
 	mux.HandleFunc("/solve", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
 		if key != "" {
