@@ -90,20 +90,22 @@ func solveCaptchaViaHTTP(captchaImg string) (string, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, `<!DOCTYPE html>
+		io.WriteString(w, `<!DOCTYPE html>
 <html><head>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:sans-serif;text-align:center;padding:20px}
-img{max-width:100%%;margin:16px 0}
-input{font-size:24px;padding:12px;width:80%%;box-sizing:border-box}
+img{max-width:100%;margin:16px 0}
+input{font-size:24px;padding:12px;width:80%;box-sizing:border-box}
 button{font-size:24px;padding:12px 32px;margin-top:12px;cursor:pointer}</style>
 </head><body>
 <h2>Введите капчу</h2>
-<img src="%s" alt="captcha"/>
+<img src="`)
+		io.WriteString(w, imgDataURI)
+		io.WriteString(w, `" alt="captcha"/>
 <form onsubmit="fetch('/solve?key='+encodeURIComponent(document.getElementById('k').value)).then(()=>{document.body.innerHTML='<h2>Готово</h2>'});return false;">
 <br><input id="k" type="text" autofocus placeholder="Текст с картинки"/>
 <br><button type="submit">Отправить</button>
-</form></body></html>`, imgDataURI)
+</form></body></html>`)
 	})
 	mux.HandleFunc("/solve", func(w http.ResponseWriter, r *http.Request) {
 		key := r.URL.Query().Get("key")
